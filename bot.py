@@ -1,17 +1,18 @@
-import os
+import asyncio
 import logging
+import os
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from google import genai
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 
@@ -54,8 +55,8 @@ def start_health_server():
     logger.info(f"سرور سلامت روی پورت {port} بالا آمد.")
     server.serve_forever()
 
+
 conversation_memory: dict[int, list] = {}
-MAX_HISTORY = 10
 waiting_for_image_prompt: set[int] = set()
 
 BTN_NEW_IMAGE = "🎨 ساخت عکس"
@@ -119,7 +120,7 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
     try:
         encoded_prompt = urllib.parse.quote(prompt)
         image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-        
+
         await update.message.reply_photo(
             photo=image_url, caption=f"🖼️ {prompt}", reply_markup=MAIN_KEYBOARD
         )
@@ -175,16 +176,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await chat_with_gemini(update, context, text)
 
 
-def main():
+async def main_async():
     threading.Thread(target=start_health_server, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
+    )
 
     logger.info("ربات در حال اجراست...")
-    app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # زنده نگه داشتن ربات
+    await asyncio.Event().wait()
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
