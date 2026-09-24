@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # اتصال به جمنای
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# ساختار حافظه گفتگوها (تا ۱۰ پیام اخیر)
+user_chat_history: dict[int, list] = {}
+MAX_HISTORY = 10
+
 
 # --- سرور سلامت برای Render ---
 def start_health_server():
@@ -56,7 +60,6 @@ def start_health_server():
     server.serve_forever()
 
 
-conversation_memory: dict[int, list] = {}
 waiting_for_image_prompt: set[int] = set()
 
 BTN_NEW_IMAGE = "🎨 ساخت عکس"
@@ -71,15 +74,23 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+SYSTEM_INSTRUCTION = (
+    "تو یک دستیار هوش مصنوعی فوق‌العاده باهوش، دقیق، خوش‌اخلاق و حرفه‌ای هستی. "
+    "پاسخ‌های تو باید کاملاً جامع، مفید، خوانا و با جزئیات کافی باشند. "
+    "از ایموجی‌های مناسب استفاده کن و متن را با ساختار مشخص (بولتبوینت یا تیتر) بنویس."
+)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user_chat_history[user_id] = []
     waiting_for_image_prompt.discard(user_id)
     await update.message.reply_text(
         "سلام! 👋\n"
-        "من یک ربات هوش مصنوعی (قدرت‌گرفته از Gemini) هستم.\n\n"
-        "• هر پیام متنی بفرستی، باهات چت می‌کنم.\n"
-        "• با دکمه‌های پایین هم می‌تونی عکس رایگان بسازی یا چت رو ریست کنی.",
+        "من یک دستیار هوش مصنوعی ارتقایافته و پیشرفته هستم.\n\n"
+        "• هر سوالی داری بنویس تا با دقت و جزئیات کامل جوابت رو بدم.\n"
+        "• حافظه چت روشنه و موضوعات قبلی یادم می‌مونه.\n"
+        "• با دکمه‌های پایین می‌تونی عکس باکیفیت بسازی یا حافظه رو پاک کنی.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -87,19 +98,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "راهنمای استفاده:\n\n"
-        f"• {BTN_NEW_IMAGE} → توصیف عکسی که می‌خوای رو بنویس.\n"
-        f"• {BTN_RESET} → حافظه چت پاک میشه.\n"
-        "• پیام عادی → چت با Gemini.",
+        f"• {BTN_NEW_IMAGE} → توصیف عکسی که می‌خوای رو بنویس تا با کیفیت بالا ساخته شه.\n"
+        f"• {BTN_RESET} → حافظه گفتگو پاک میشه و از اول شروع می‌کنیم.\n"
+        "• ارسال متن عادی → گفتگو و پرسش‌وپاسخ پیشرفته.",
         reply_markup=MAIN_KEYBOARD,
     )
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    conversation_memory.pop(user_id, None)
+    user_chat_history[user_id] = []
     waiting_for_image_prompt.discard(user_id)
     await update.message.reply_text(
-        "حافظه گفتگو پاک شد!", reply_markup=MAIN_KEYBOARD
+        "حافظه گفتگو کاملاً پاک شد! آماده‌ی موضوع جدید هستیم 🔄",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -107,57 +119,78 @@ async def ask_for_image_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     waiting_for_image_prompt.add(user_id)
     await update.message.reply_text(
-        "توضیح عکسی که می‌خوای رو بنویس (می‌تونی فارسی یا انگلیسی بنویسی):\n"
-        "مثال: یک توپ فوتبال روی چمن"
+        "توضیح عکسی که می‌خوای رو با جزئیات بنویس (فارسی یا انگلیسی):\n"
+        "مثال: یک ماشین اسپرت مدرن سرخ‌رنگ در حال حرکت در جاده برفی با نورپردازی سینمایی"
     )
 
 
-# فراخوانی ایمن جمنای با قابلیت مدیریت شلوغی سرور
-def safe_generate_content(prompt_text: str) -> str:
+# ارسال ایمن با قابلیت حفظ تاریخچه و مدیریت شلوغی
+def generate_smart_chat_response(user_id: int, new_message: str) -> str:
+    if user_id not in user_chat_history:
+        user_chat_history[user_id] = []
+
+    # اضافه کردن پیام جدید کاربر به تاریخچه
+    history = user_chat_history[user_id]
+    history.append({"role": "user", "parts": [new_message]})
+
+    # نگه‌داشتن فقط پیام‌های اخیر
+    if len(history) > MAX_HISTORY * 2:
+        history = history[-(MAX_HISTORY * 2) :]
+        user_chat_history[user_id] = history
+
     models_to_try = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
-    
+
+    # ساخت متن شامل دستور سیستم و تاریخچه
+    prompt_payload = f"System Instruction: {SYSTEM_INSTRUCTION}\n\n"
+    for item in history:
+        role_label = "User" if item["role"] == "user" else "Assistant"
+        prompt_payload += f"{role_label}: {item['parts'][0]}\n"
+    prompt_payload += "Assistant:"
+
     for model_name in models_to_try:
-        for attempt in range(2):  # ۲ بار تلاش برای هر مدل
-            try:
-                response = ai_client.models.generate_content(
-                    model=model_name,
-                    contents=prompt_text,
-                )
-                if response and response.text:
-                    return response.text.strip()
-            except Exception as e:
-                logger.warning(f"خطا در مدل {model_name} (تلاش {attempt+1}): {e}")
-                import time
-                time.sleep(1)  # ۱ ثانیه مکث پیش از تلاش مجدد
-                
-    raise RuntimeError("در حال حاضر تمام سرورهای جمنای شلوغ هستند. لطفاً چند لحظه بعد تلاش کنید.")
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=prompt_payload,
+            )
+            if response and response.text:
+                reply = response.text.strip()
+                # ذخیره پاسخ مدل در تاریخچه
+                history.append({"role": "model", "parts": [reply]})
+                return reply
+        except Exception as e:
+            logger.warning(f"Error on model {model_name}: {e}")
+
+    raise RuntimeError("در حال حاضر تمامی سرورها مشغول هستند. دوباره تلاش کن.")
 
 
-# ترجمه خودکار متن عکس به انگلیسی
+# ترجمه هوشمند پرامپت ساخت عکس
 def translate_prompt_to_english(text: str) -> str:
     try:
-        prompt_instruction = f"Translate the following image description to a precise, clear English prompt for AI image generation. Output ONLY the English translation, nothing else: {text}"
-        return safe_generate_content(prompt_instruction)
-    except Exception as e:
-        logger.warning(f"Translation failed, using raw prompt: {e}")
+        instruction = f"Enhance and translate this image prompt into a high-detail English prompt for Flux image generator. Return ONLY the English prompt: {text}"
+        res = ai_client.models.generate_content(
+            model="gemini-3.6-flash", contents=instruction
+        )
+        return res.text.strip()
+    except Exception:
         return text
 
 
-# ساخت عکس رایگان با موتور Pollinations
+# ساخت عکس هوشمند
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
-    status_msg = await update.message.reply_text("🎨 در حال ترجمه و ساخت عکس...")
+    status_msg = await update.message.reply_text("🎨 در حال پردازش و ارتقای توصیف تصویر...")
 
     try:
-        # ترجمه پرامپت فارسی به انگلیسی
         english_prompt = translate_prompt_to_english(prompt)
-        logger.info(f"Original: {prompt} -> English: {english_prompt}")
-
         encoded_prompt = urllib.parse.quote(english_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&nologo=true&model=flux&enhance=true"
 
         await update.message.reply_photo(
-            photo=image_url, caption=f"🖼️ {prompt}", reply_markup=MAIN_KEYBOARD
+            photo=image_url,
+            caption=f"🖼️ **نتیجه ساخت تصویر**\n\n📝 درخواست شما: {prompt}",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
         )
     except Exception as e:
         logger.exception("خطا در ساخت عکس")
@@ -168,15 +201,15 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         await status_msg.delete()
 
 
-# چت رایگان با Gemini
 async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+    user_id = update.effective_user.id
     await update.message.chat.send_action(ChatAction.TYPING)
 
     try:
-        reply_text = safe_generate_content(user_text)
+        reply_text = generate_smart_chat_response(user_id, user_text)
         await update.message.reply_text(reply_text, reply_markup=MAIN_KEYBOARD)
     except Exception as e:
-        logger.exception("خطا در دریافت پاسخ از Gemini")
+        logger.exception("خطا در دریافت پاسخ")
         await update.message.reply_text(
             f"مشکلی پیش آمد:\n{e}", reply_markup=MAIN_KEYBOARD
         )
@@ -216,12 +249,11 @@ async def main_async():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    logger.info("ربات در حال اجراست...")
+    logger.info("ربات هوشمند در حال اجراست...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
-    # زنده نگه داشتن ربات
     await asyncio.Event().wait()
 
 
