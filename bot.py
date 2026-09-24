@@ -112,15 +112,32 @@ async def ask_for_image_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
-# ترجمه خودکار متن عکس به انگلیسی جهت جلوگیری از اشتباه در تصویرسازی
+# فراخوانی ایمن جمنای با قابلیت مدیریت شلوغی سرور
+def safe_generate_content(prompt_text: str) -> str:
+    models_to_try = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    
+    for model_name in models_to_try:
+        for attempt in range(2):  # ۲ بار تلاش برای هر مدل
+            try:
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_text,
+                )
+                if response and response.text:
+                    return response.text.strip()
+            except Exception as e:
+                logger.warning(f"خطا در مدل {model_name} (تلاش {attempt+1}): {e}")
+                import time
+                time.sleep(1)  # ۱ ثانیه مکث پیش از تلاش مجدد
+                
+    raise RuntimeError("در حال حاضر تمام سرورهای جمنای شلوغ هستند. لطفاً چند لحظه بعد تلاش کنید.")
+
+
+# ترجمه خودکار متن عکس به انگلیسی
 def translate_prompt_to_english(text: str) -> str:
     try:
         prompt_instruction = f"Translate the following image description to a precise, clear English prompt for AI image generation. Output ONLY the English translation, nothing else: {text}"
-        response = ai_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt_instruction,
-        )
-        return response.text.strip()
+        return safe_generate_content(prompt_instruction)
     except Exception as e:
         logger.warning(f"Translation failed, using raw prompt: {e}")
         return text
@@ -132,7 +149,7 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
     status_msg = await update.message.reply_text("🎨 در حال ترجمه و ساخت عکس...")
 
     try:
-        # ترجمه پرامپت فارسی به انگلیسی توسط جمنای
+        # ترجمه پرامپت فارسی به انگلیسی
         english_prompt = translate_prompt_to_english(prompt)
         logger.info(f"Original: {prompt} -> English: {english_prompt}")
 
@@ -156,11 +173,7 @@ async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     await update.message.chat.send_action(ChatAction.TYPING)
 
     try:
-        response = ai_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=user_text,
-        )
-        reply_text = response.text
+        reply_text = safe_generate_content(user_text)
         await update.message.reply_text(reply_text, reply_markup=MAIN_KEYBOARD)
     except Exception as e:
         logger.exception("خطا در دریافت پاسخ از Gemini")
