@@ -107,19 +107,37 @@ async def ask_for_image_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     waiting_for_image_prompt.add(user_id)
     await update.message.reply_text(
-        "توضیح عکسی که می‌خوای رو بنویس:\n"
-        "مثال: یک گربه فضانورد روی ماه"
+        "توضیح عکسی که می‌خوای رو بنویس (می‌تونی فارسی یا انگلیسی بنویسی):\n"
+        "مثال: یک توپ فوتبال روی چمن"
     )
+
+
+# ترجمه خودکار متن عکس به انگلیسی جهت جلوگیری از اشتباه در تصویرسازی
+def translate_prompt_to_english(text: str) -> str:
+    try:
+        prompt_instruction = f"Translate the following image description to a precise, clear English prompt for AI image generation. Output ONLY the English translation, nothing else: {text}"
+        response = ai_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt_instruction,
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.warning(f"Translation failed, using raw prompt: {e}")
+        return text
 
 
 # ساخت عکس رایگان با موتور Pollinations
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
-    status_msg = await update.message.reply_text("🎨 در حال ساخت عکس...")
+    status_msg = await update.message.reply_text("🎨 در حال ترجمه و ساخت عکس...")
 
     try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        # ترجمه پرامپت فارسی به انگلیسی توسط جمنای
+        english_prompt = translate_prompt_to_english(prompt)
+        logger.info(f"Original: {prompt} -> English: {english_prompt}")
+
+        encoded_prompt = urllib.parse.quote(english_prompt)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
 
         await update.message.reply_photo(
             photo=image_url, caption=f"🖼️ {prompt}", reply_markup=MAIN_KEYBOARD
@@ -135,12 +153,11 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
 
 # چت رایگان با Gemini
 async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
-    user_id = update.effective_user.id
     await update.message.chat.send_action(ChatAction.TYPING)
 
     try:
         response = ai_client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             contents=user_text,
         )
         reply_text = response.text
