@@ -117,7 +117,7 @@ def translate_prompt_to_english(text: str) -> str:
     try:
         prompt_instruction = f"Translate the following image description to a precise, clear English prompt for AI image generation. Output ONLY the English translation, nothing else: {text}"
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.6-flash",
             contents=prompt_instruction,
         )
         return response.text.strip()
@@ -157,7 +157,7 @@ async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
     try:
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.6-flash",
             contents=user_text,
         )
         reply_text = response.text
