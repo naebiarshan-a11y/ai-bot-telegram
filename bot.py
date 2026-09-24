@@ -6,6 +6,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -36,9 +37,27 @@ logger = logging.getLogger(__name__)
 # اتصال به جمنای
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ساختار حافظه گفتگوها (تا ۱۰ پیام اخیر)
-user_chat_history: dict[int, list] = {}
-MAX_HISTORY = 10
+# ذخیره جلسات چت کاربران
+user_sessions: dict[int, any] = {}
+waiting_for_image_prompt: set[int] = set()
+
+BTN_NEW_IMAGE = "🎨 ساخت عکس"
+BTN_RESET = "🔄 شروع گفتگوی جدید"
+BTN_HELP = "❓ راهنما"
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton(BTN_NEW_IMAGE)],
+        [KeyboardButton(BTN_RESET), KeyboardButton(BTN_HELP)],
+    ],
+    resize_keyboard=True,
+)
+
+SYSTEM_INSTRUCTION = (
+    "تو یک دستیار هوش مصنوعی فوق‌العاده باهوش، دقیق، خوش‌اخلاق و حرفه‌ای هستی. "
+    "پاسخ‌های تو باید کاملاً جامع، مفید، خوانا و با جزئیات کافی باشند. "
+    "از ایموجی‌های مناسب استفاده کن و متن را با ساختار مشخص و تیتربندی بنویس."
+)
 
 
 # --- سرور سلامت برای Render ---
@@ -60,37 +79,32 @@ def start_health_server():
     server.serve_forever()
 
 
-waiting_for_image_prompt: set[int] = set()
-
-BTN_NEW_IMAGE = "🎨 ساخت عکس"
-BTN_RESET = "🔄 شروع گفتگوی جدید"
-BTN_HELP = "❓ راهنما"
-
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton(BTN_NEW_IMAGE)],
-        [KeyboardButton(BTN_RESET), KeyboardButton(BTN_HELP)],
-    ],
-    resize_keyboard=True,
-)
-
-SYSTEM_INSTRUCTION = (
-    "تو یک دستیار هوش مصنوعی فوق‌العاده باهوش، دقیق، خوش‌اخلاق و حرفه‌ای هستی. "
-    "پاسخ‌های تو باید کاملاً جامع، مفید، خوانا و با جزئیات کافی باشند. "
-    "از ایموجی‌های مناسب استفاده کن و متن را با ساختار مشخص (بولتبوینت یا تیتر) بنویس."
-)
+def get_or_create_chat(user_id: int):
+    """ایجاد یا دریافت جلسه چت کاربر"""
+    if user_id not in user_sessions:
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.7,
+        )
+        # استفاده از مدل رسمی و پایدار gemini-2.5-flash
+        user_sessions[user_id] = ai_client.chats.create(
+            model="gemini-2.5-flash",
+            config=config,
+        )
+    return user_sessions[user_id]
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_chat_history[user_id] = []
+    user_sessions.pop(user_id, None)
     waiting_for_image_prompt.discard(user_id)
+    
     await update.message.reply_text(
         "سلام! 👋\n"
-        "من یک دستیار هوش مصنوعی ارتقایافته و پیشرفته هستم.\n\n"
-        "• هر سوالی داری بنویس تا با دقت و جزئیات کامل جوابت رو بدم.\n"
-        "• حافظه چت روشنه و موضوعات قبلی یادم می‌مونه.\n"
-        "• با دکمه‌های پایین می‌تونی عکس باکیفیت بسازی یا حافظه رو پاک کنی.",
+        "من یک دستیار هوش مصنوعی هوشمند و پیشرفته هستم.\n\n"
+        "• هر سوالی داری بپرس تا کامل و باجزئیات پاسخت رو بدم.\n"
+        "• حافظه چت فعاله و موضوعات قبلی رو به خاطر می‌سپارم.\n"
+        "• با دکمه‌های پایین می‌تونی عکس بسازی یا گفتگوت رو ریست کنی.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -98,19 +112,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "راهنمای استفاده:\n\n"
-        f"• {BTN_NEW_IMAGE} → توصیف عکسی که می‌خوای رو بنویس تا با کیفیت بالا ساخته شه.\n"
-        f"• {BTN_RESET} → حافظه گفتگو پاک میشه و از اول شروع می‌کنیم.\n"
-        "• ارسال متن عادی → گفتگو و پرسش‌وپاسخ پیشرفته.",
+        f"• {BTN_NEW_IMAGE} → توصیف عکس رو بنویس تا با کیفیت بالا ساخته بشه.\n"
+        f"• {BTN_RESET} → حافظه چت پاک میشه و گفتگو از ابتدا شروع میشه.\n"
+        "• ارسال متن معمولی → گفتگو با هوش مصنوعی.",
         reply_markup=MAIN_KEYBOARD,
     )
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_chat_history[user_id] = []
+    user_sessions.pop(user_id, None)
     waiting_for_image_prompt.discard(user_id)
     await update.message.reply_text(
-        "حافظه گفتگو کاملاً پاک شد! آماده‌ی موضوع جدید هستیم 🔄",
+        "حافظه گفتگو کاملاً پاک شد! آماده شروع موضوع جدید هستیم 🔄",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -120,75 +134,36 @@ async def ask_for_image_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     waiting_for_image_prompt.add(user_id)
     await update.message.reply_text(
         "توضیح عکسی که می‌خوای رو با جزئیات بنویس (فارسی یا انگلیسی):\n"
-        "مثال: یک ماشین اسپرت مدرن سرخ‌رنگ در حال حرکت در جاده برفی با نورپردازی سینمایی"
+        "مثال: یک ماشین اسپرت مدرن سرخ‌رنگ در حال حرکت در جاده برفی"
     )
 
 
-# ارسال ایمن با قابلیت حفظ تاریخچه و مدیریت شلوغی
-def generate_smart_chat_response(user_id: int, new_message: str) -> str:
-    if user_id not in user_chat_history:
-        user_chat_history[user_id] = []
-
-    # اضافه کردن پیام جدید کاربر به تاریخچه
-    history = user_chat_history[user_id]
-    history.append({"role": "user", "parts": [new_message]})
-
-    # نگه‌داشتن فقط پیام‌های اخیر
-    if len(history) > MAX_HISTORY * 2:
-        history = history[-(MAX_HISTORY * 2) :]
-        user_chat_history[user_id] = history
-
-    models_to_try = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
-
-    # ساخت متن شامل دستور سیستم و تاریخچه
-    prompt_payload = f"System Instruction: {SYSTEM_INSTRUCTION}\n\n"
-    for item in history:
-        role_label = "User" if item["role"] == "user" else "Assistant"
-        prompt_payload += f"{role_label}: {item['parts'][0]}\n"
-    prompt_payload += "Assistant:"
-
-    for model_name in models_to_try:
-        try:
-            response = ai_client.models.generate_content(
-                model=model_name,
-                contents=prompt_payload,
-            )
-            if response and response.text:
-                reply = response.text.strip()
-                # ذخیره پاسخ مدل در تاریخچه
-                history.append({"role": "model", "parts": [reply]})
-                return reply
-        except Exception as e:
-            logger.warning(f"Error on model {model_name}: {e}")
-
-    raise RuntimeError("در حال حاضر تمامی سرورها مشغول هستند. دوباره تلاش کن.")
-
-
-# ترجمه هوشمند پرامپت ساخت عکس
 def translate_prompt_to_english(text: str) -> str:
+    """ترجمه و ارتقای توصیف تصویر به انگلیسی"""
     try:
-        instruction = f"Enhance and translate this image prompt into a high-detail English prompt for Flux image generator. Return ONLY the English prompt: {text}"
+        instruction = f"Enhance and translate this image prompt into a clear English prompt for AI image generator. Return ONLY the English prompt: {text}"
         res = ai_client.models.generate_content(
-            model="gemini-3.6-flash", contents=instruction
+            model="gemini-2.5-flash",
+            contents=instruction,
         )
         return res.text.strip()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Translation error: {e}")
         return text
 
 
-# ساخت عکس هوشمند
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
     await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
-    status_msg = await update.message.reply_text("🎨 در حال پردازش و ارتقای توصیف تصویر...")
+    status_msg = await update.message.reply_text("🎨 در حال پردازش و ساخت تصویر...")
 
     try:
         english_prompt = translate_prompt_to_english(prompt)
         encoded_prompt = urllib.parse.quote(english_prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&nologo=true&model=flux&enhance=true"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
 
         await update.message.reply_photo(
             photo=image_url,
-            caption=f"🖼️ **نتیجه ساخت تصویر**\n\n📝 درخواست شما: {prompt}",
+            caption=f"🖼️ **درخواست شما:** {prompt}",
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
@@ -205,14 +180,27 @@ async def chat_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     user_id = update.effective_user.id
     await update.message.chat.send_action(ChatAction.TYPING)
 
-    try:
-        reply_text = generate_smart_chat_response(user_id, user_text)
-        await update.message.reply_text(reply_text, reply_markup=MAIN_KEYBOARD)
-    except Exception as e:
-        logger.exception("خطا در دریافت پاسخ")
-        await update.message.reply_text(
-            f"مشکلی پیش آمد:\n{e}", reply_markup=MAIN_KEYBOARD
-        )
+    # مدل‌هایی که در صورت شلوغی سرور به ترتیب امتحان می‌شوند
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"]
+    
+    for model_name in models_to_try:
+        try:
+            chat = get_or_create_chat(user_id)
+            # اگر مدل تغییر کند، مدل چت هم به‌روز می‌شود
+            chat._model = model_name
+            
+            response = chat.send_message(user_text)
+            if response and response.text:
+                await update.message.reply_text(response.text.strip(), reply_markup=MAIN_KEYBOARD)
+                return
+        except Exception as e:
+            logger.warning(f"Error on model {model_name}: {e}")
+            await asyncio.sleep(1)
+
+    await update.message.reply_text(
+        "در حال حاضر سرورهای جمنای با ترافیک بالا مواجه شده‌اند. لطفاً چند لحظه بعد مجدداً پیام دهید.",
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,7 +237,7 @@ async def main_async():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    logger.info("ربات هوشمند در حال اجراست...")
+    logger.info("ربات در حال اجراست...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
